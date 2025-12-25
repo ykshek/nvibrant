@@ -9,6 +9,9 @@
 #include "nvkms-ioctl.h"
 #include "nvkms-api.h"
 
+// New CLI
+#include <getopt.h>
+
 // ------------------------------------------------------------------------------------------------|
 
 // NvKms ioctl calls must match the driver version
@@ -58,10 +61,78 @@ int get_int(int argc, char* argv[], int index, int min, int max, int fallback) {
     return std::max(min, std::min(max, (index < argc) ? atoi(argv[index]) : fallback));
 }
 
+void usage(void)
+{
+    printf( "Usage: nvibrant [VIBRANCE] [OPTION]...\n"
+    "\t-h, --help\t\t\t Display this help\n"
+    "\t-d [ID], --display=[ID]\t\t Specify which display to set. Set all if unspecified\n"
+    "\t-l, --list\t\t\t List all vibrance settings of all ports without setting"
+    "\n"
+    "The ID argument is an integer specifying which display to set.\n"
+    "If unset or invalid, defaults to setting all connected displays.\n"
+    "\n"
+    "Exit status:\n"
+    "0\tif OK,\n"
+    "1\tif problem occurs.\n"
+    );
+    return;
+}
+
 // ------------------------------------------------------------------------------------------------|
 
-int main(int argc, char *argv[]) {
+int main(int argc, char **argv) {
     printf("Driver version: (%s)\n", NVIDIA_DRIVER_VERSION);
+
+    int opt;
+    int display_id = -1;    // -1 means set all valid monitors, -2 means none.
+
+
+    const char *options = "hdl";
+    struct option long_options[] = {
+        {"help",    0,      NULL,   'h'},
+        {"display", 0,      NULL,   'd'},
+        {"list",    0,      NULL,   'l'},
+        {NULL,      0,      NULL,   0}
+    };
+
+    while (true) {
+        opt = getopt_long(argc, argv, options, long_options, NULL);
+        if (opt == -1)
+            break;
+        switch(opt) {
+            case 'h':
+                usage();
+                break;
+            case 'd':
+                display_id = atoi(optarg);
+                break;
+            case 'l':
+                display_id = -2;
+                // skip command line parsing with display_id = -2
+                break;
+            case '?':
+                printf("Unknown option '%c' (decimal: %d)\n", optopt, optopt);
+                usage();
+                exit(0);
+                break;
+            default:
+                printf("Error at '%c' (decimal: %d)\n", optopt, optopt);
+                exit(1);
+                break;
+        }
+    }
+    int vibrance = 0;
+    int dithering = 2;
+    int nargs = argc - optind?optind:1;
+    char *endptr;
+    if (argv[nargs])
+        vibrance = strtol(argv[nargs], &endptr, 10);
+    vibrance = (*endptr != '\0' || !display_id) && !(vibrance >= -1023 || vibrance <= 1024)? 0: vibrance;
+    if (argv[nargs + 1])
+        dithering = strtol(argv[nargs], &endptr, 10);
+    dithering = (*endptr != '\0' || !display_id) && !(dithering >= 0 || dithering <= 2)? 2: dithering;
+
+    printf("Setting Vibrance %d for display %d.\n", vibrance, display_id);
 
     // Open the nvidia-modeset file descriptor
     int modeset = open("/dev/nvidia-modeset", O_RDWR);
@@ -152,12 +223,12 @@ int main(int argc, char *argv[]) {
             setDpyAttr.request.dpyId        = staticData.reply.dpyId;
 
             // Branch on what display attribute to set
-            if (strcmp(ATTRIBUTE, "vibrance") == 0) {
+            if (strcmp(ATTRIBUTE, "vibrance") == 0 && (index == display_id || display_id == -2)) {
                 setDpyAttr.request.attribute = NV_KMS_DPY_ATTRIBUTE_DIGITAL_VIBRANCE;
-                setDpyAttr.request.value     = get_int(argc, argv, index, -1024, 1023, 0);
-            } else if (strcmp(ATTRIBUTE, "dithering") == 0) {
+                setDpyAttr.request.value     = vibrance;
+            } else if (strcmp(ATTRIBUTE, "dithering") == 0 && (index == display_id || display_id == -2)) {
                 setDpyAttr.request.attribute = NV_KMS_DPY_ATTRIBUTE_REQUESTED_DITHERING;
-                setDpyAttr.request.value     = get_int(argc, argv, index, 0, 2, 2);
+                setDpyAttr.request.value     = dithering;
             } else {
                 printf("Unknown attribute '%s' to set\n", ATTRIBUTE);
                 continue;
