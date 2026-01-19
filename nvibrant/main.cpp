@@ -57,16 +57,18 @@ template <typename T> int easy_nvkms_ioctl(int fd, NvU32 cmd, T* data) {
 }
 
 // Smart parse, limit, safe default an integer from argv at a given index
-int get_int(int argc, char* argv[], int index, int min, int max, int fallback) {
-    return std::max(min, std::min(max, (index < argc) ? atoi(argv[index]) : fallback));
+int get_int(int argc, char* argv[], int index, int min, int max, int fallback, int ovride) {
+    if (ovride) return ovride;
+    else return std::max(min, std::min(max, (index < argc) ? atoi(argv[index]) : fallback));
 }
 
 void usage(void)
 {
-    printf( "Usage: nvibrant [VIBRANCE] [OPTION]...\n"
+    printf( "Usage: nvibrant [OPTION] [VIBRANCE]...\n"
     "\t-h, --help\t\t\t Display this help\n"
     "\t-d [ID], --display=[ID]\t\t Specify which display to set. Set all if unspecified\n"
-    "\t-l, --list\t\t\t List all vibrance settings of all ports without setting"
+    "\t-l, --list\t\t\t List all vibrance settings of all ports without setting\n"
+    "\t-i, --dithering\t\t\t Interpret any values as dithering, can also be set with env vars\n"
     "\n"
     "The ID argument is an integer specifying which display to set.\n"
     "If unset or invalid, defaults to setting all connected displays.\n"
@@ -80,21 +82,27 @@ void usage(void)
 
 // ------------------------------------------------------------------------------------------------|
 
-int main(int argc, char **argv) {
-    printf("Driver version: (%s)\n", NVIDIA_DRIVER_VERSION);
+int main(int argc, char *argv[]) {
+
 
     int opt;
-    int display_id = -1;    // -1 means set all valid monitors, -2 means none.
+    int display_id = -1; // -1 means all_displays = true
+    int d_arg;
+    bool all_displays = false;
+    bool list = false;   // If list is true, don't set anything and only list displays
 
+    int vibrance = 0;
+    bool set_dithering = strcmp(ATTRIBUTE, "dithering") == 0;
 
-    const char *options = "hdl";
+    // Declare all valid arguments
+    const char *options = "hdli";
     struct option long_options[] = {
         {"help",    0,      NULL,   'h'},
-        {"display", 0,      NULL,   'd'},
+        {"display", 1,      &d_arg,   'd'},
         {"list",    0,      NULL,   'l'},
+        {"dithering", 0,    NULL,   'i'},
         {NULL,      0,      NULL,   0}
     };
-
     while (true) {
         opt = getopt_long(argc, argv, options, long_options, NULL);
         if (opt == -1)
@@ -102,13 +110,21 @@ int main(int argc, char **argv) {
         switch(opt) {
             case 'h':
                 usage();
+                exit(0);
                 break;
             case 'd':
-                display_id = atoi(optarg);
+                display_id = atoi(argv[d_arg]);
+                printf("Argument at: %d\n", d_arg);
+                printf("Setting display: %d\n", display_id);
+                // This is not exactly safe, probably fix it in the future
+                break;
+            case 'i':
+                set_dithering = true;
+                // This will override the environment variable if set
                 break;
             case 'l':
-                display_id = -2;
-                // skip command line parsing with display_id = -2
+                list = true;
+                // Don't set anything and only list displays
                 break;
             case '?':
                 printf("Unknown option '%c' (decimal: %d)\n", optopt, optopt);
@@ -121,18 +137,21 @@ int main(int argc, char **argv) {
                 break;
         }
     }
-    int vibrance = 0;
-    int dithering = 2;
-    int nargs = argc - optind?optind:1;
-    char *endptr;
-    if (argv[nargs])
-        vibrance = strtol(argv[nargs], &endptr, 10);
-    vibrance = (*endptr != '\0' || !display_id) && !(vibrance >= -1023 || vibrance <= 1024)? 0: vibrance;
-    if (argv[nargs + 1])
-        dithering = strtol(argv[nargs], &endptr, 10);
-    dithering = (*endptr != '\0' || !display_id) && !(dithering >= 0 || dithering <= 2)? 2: dithering;
 
-    printf("Setting Vibrance %d for display %d.\n", vibrance, display_id);
+
+
+    int nargs = argc - optind?optind + 1:0;     // Remaining unparsed arguments are treated with old method to retain backwards-compat.
+    printf("Remaining args: %d, \t Total args: %d, \t Opt index: %d\n", nargs, argc, optind);
+    if (nargs <= 1 && display_id == -1) {
+        all_displays = true;
+        printf("Setting for all displays.\n");
+    }
+
+    if (nargs == 1)
+        vibrance = atoi(argv[nargs + 1]);
+    printf("Value to be set: %d\n", vibrance);
+
+    printf("Driver version: (%s)\n", NVIDIA_DRIVER_VERSION);
 
     // Open the nvidia-modeset file descriptor
     int modeset = open("/dev/nvidia-modeset", O_RDWR);
@@ -222,13 +241,26 @@ int main(int argc, char **argv) {
             setDpyAttr.request.dispHandle   = allocDevice.reply.dispHandles[display];
             setDpyAttr.request.dpyId        = staticData.reply.dpyId;
 
+            // Always set if all_displays is true.
+            if (all_displays) display_id = index;
+
+            // Don't set anything if --list
+            if (list) {
+                printf("Not setting due to --list\n");
+                continue;
+            }
+
+            int i = index - 1;
+            printf("Display ID: %d,\tIndex: %d, \tDithering: %b\n", display_id, i, set_dithering);
             // Branch on what display attribute to set
-            if (strcmp(ATTRIBUTE, "vibrance") == 0 && (index == display_id || display_id == -2)) {
+            if (!set_dithering && display_id == i) {
                 setDpyAttr.request.attribute = NV_KMS_DPY_ATTRIBUTE_DIGITAL_VIBRANCE;
-                setDpyAttr.request.value     = vibrance;
-            } else if (strcmp(ATTRIBUTE, "dithering") == 0 && (index == display_id || display_id == -2)) {
+                setDpyAttr.request.value     = get_int(argc, argv, nargs + i, -1024, 1023, 0, vibrance);
+                printf("Setting as %d.\n", atoi(argv[nargs + i]));
+            } else if (set_dithering && display_id == i) {
                 setDpyAttr.request.attribute = NV_KMS_DPY_ATTRIBUTE_REQUESTED_DITHERING;
-                setDpyAttr.request.value     = dithering;
+                setDpyAttr.request.value     = get_int(argc, argv, nargs + i, 0, 2, 2, vibrance);
+                printf("Setting as %d.\n", atoi(argv[nargs + i]));
             } else {
                 printf("Unknown attribute '%s' to set\n", ATTRIBUTE);
                 continue;
